@@ -466,40 +466,7 @@
   }
   .note-area:focus { outline: none; border-color: var(--accent); }
 
-  /* PROPOSAL LOG */
-  .log-entry {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    padding: 12px;
-    margin-bottom: 8px;
-  }
-  .log-entry-header {
-    display: flex;
-    justify-content: space-between;
-    margin-bottom: 6px;
-    font-size: 12px;
-    color: var(--text-muted);
-  }
-  .log-verdict {
-    font-size: 12px;
-    padding: 2px 8px;
-    border-radius: 20px;
-    font-weight: 500;
-  }
-  .log-verdict.pos { background: var(--green-soft); color: var(--green); }
-  .log-verdict.neg { background: var(--red-soft); color: var(--red); }
-  .log-verdict.neu { background: var(--yellow-soft); color: var(--yellow); }
 
-  .badge-new {
-    background: var(--accent-soft);
-    color: var(--accent);
-    font-size: 10px;
-    font-weight: 700;
-    padding: 2px 7px;
-    border-radius: 20px;
-    letter-spacing: 0.5px;
-  }
 </style>
 </head>
 <body>
@@ -601,13 +568,7 @@
       </button>
     </div>
 
-    <!-- PROPOSAL LOG (commissioner only) -->
-    <div id="proposal-log-section" style="display:none">
-      <div class="section-label" style="margin-top:28px">
-        Trade Proposals <span class="badge-new" id="new-badge"></span>
-      </div>
-      <div id="proposal-log"></div>
-    </div>
+
 
   </div>
 </div>
@@ -628,21 +589,20 @@ let spencerRoster = null;
 let mySelectedGive = new Set();
 let mySelectedReceive = new Set();
 let currentFriendRosterId = null;
-let proposalLog = [];
 let commUnlocked = false;
 let lastResultData = null;
 
 // ── INIT ──────────────────────────────────────────────────────────────────
 async function init() {
   try {
-    setLoadStep('Fetching dynasty values...');
-    await loadDynastyValues();
+    setLoadStep('Loading dynasty values...');
+    dpValues = getEmbeddedValues();
 
     setLoadStep('Loading league rosters...');
     await loadLeague();
 
     setLoadStep('Done!');
-    await new Promise(r => setTimeout(r, 400));
+    await new Promise(r => setTimeout(r, 300));
 
     document.getElementById('loading-screen').style.display = 'none';
     document.getElementById('app').style.display = 'block';
@@ -651,7 +611,6 @@ async function init() {
 
     renderMyRoster();
     populateTeamDropdown();
-    loadProposalLog();
   } catch(e) {
     document.getElementById('load-step').textContent = 'Error: ' + e.message;
     document.getElementById('load-step').style.color = '#ef4444';
@@ -664,39 +623,6 @@ function setLoadStep(msg) {
 }
 
 // ── DATA LOADING ──────────────────────────────────────────────────────────
-async function loadDynastyValues() {
-  try {
-    const r = await fetch('https://raw.githubusercontent.com/dynastyprocess/data/master/files/values.csv');
-    const text = await r.text();
-    parseDPValues(text);
-  } catch(e) {
-    // fallback: use hardcoded top values
-    dpValues = getHardcodedValues();
-  }
-}
-
-function parseDPValues(csv) {
-  const lines = csv.trim().split('\n');
-  const headers = lines[0].split(',');
-  const nameIdx = headers.indexOf('player');
-  const val2qbIdx = headers.indexOf('value_2qb');
-  const val1qbIdx = headers.indexOf('value_1qb');
-  const posIdx = headers.indexOf('pos');
-  const teamIdx = headers.indexOf('team');
-  const ageIdx = headers.indexOf('age');
-
-  for(let i = 1; i < lines.length; i++) {
-    const cols = lines[i].split(',');
-    const name = cols[nameIdx]?.replace(/"/g,'').trim();
-    if(!name) continue;
-    const val2qb = parseInt(cols[val2qbIdx]) || parseInt(cols[val1qbIdx]) || 0;
-    const pos = cols[posIdx]?.replace(/"/g,'').trim() || '';
-    const team = cols[teamIdx]?.replace(/"/g,'').trim() || '';
-    const age = parseFloat(cols[ageIdx]) || 0;
-    const key = normalizeName(name);
-    dpValues[key] = { name, value: val2qb, pos, team, age };
-  }
-}
 
 function normalizeName(n) {
   return (n || '').toLowerCase()
@@ -1095,9 +1021,6 @@ function evaluateTrade() {
 
   lastResultData = { diff, giveTotal: Math.round(giveAdjusted), receiveTotal: Math.round(receiveAdjusted), giveItems, receiveItems };
 
-  // Log proposal
-  logProposal(diff, giveItems, receiveItems);
-
   const { msg, emoji, style } = getVerdict(diff);
 
   const resultCard = document.getElementById('result-card');
@@ -1140,7 +1063,6 @@ function checkPw() {
     document.querySelector('.pw-btn').style.display = 'none';
     document.querySelector('.pw-row').style.display = 'none';
     showCommStats();
-    showProposalLog();
   } else {
     errEl.style.display = 'block';
   }
@@ -1171,61 +1093,7 @@ function showCommStats() {
   `;
 }
 
-// ── PROPOSAL LOG ──────────────────────────────────────────────────────────
-function logProposal(diff, giveItems, receiveItems) {
-  const entry = {
-    ts: new Date().toISOString(),
-    diff,
-    giveItems,
-    receiveItems,
-    note: document.getElementById('trade-note').value || '',
-    verdict: getVerdict(diff)
-  };
-  proposalLog.unshift(entry);
-  try { localStorage.setItem('trade_log', JSON.stringify(proposalLog.slice(0, 30))); } catch(e) {}
-}
 
-function loadProposalLog() {
-  try {
-    const saved = localStorage.getItem('trade_log');
-    if(saved) proposalLog = JSON.parse(saved);
-  } catch(e) {}
-}
-
-function showProposalLog() {
-  document.getElementById('proposal-log-section').style.display = 'block';
-  const container = document.getElementById('proposal-log');
-  container.innerHTML = '';
-
-  if(proposalLog.length === 0) {
-    container.innerHTML = '<div style="font-size:13px;color:var(--text-dim);padding:12px 0;">No proposals yet</div>';
-    return;
-  }
-
-  document.getElementById('new-badge').textContent = proposalLog.length + ' total';
-
-  proposalLog.forEach(entry => {
-    const date = new Date(entry.ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-    const cls = entry.diff > 0 ? 'pos' : entry.diff < 0 ? 'neg' : 'neu';
-    const sign = entry.diff > 0 ? '+' : '';
-    const el = document.createElement('div');
-    el.className = 'log-entry';
-    el.innerHTML = `
-      <div class="log-entry-header">
-        <span>${date}</span>
-        <span class="log-verdict ${cls}">${sign}${entry.diff.toLocaleString()} pts</span>
-      </div>
-      <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px;">
-        <strong style="color:var(--text)">Receive:</strong> ${entry.receiveItems.map(x=>x.name).join(', ') || '—'}
-      </div>
-      <div style="font-size:12px;color:var(--text-muted);margin-bottom:${entry.note?'4px':'0'}">
-        <strong style="color:var(--text)">Give:</strong> ${entry.giveItems.map(x=>x.name).join(', ') || '—'}
-      </div>
-      ${entry.note ? `<div style="font-size:12px;color:var(--text-dim);margin-top:4px;font-style:italic;">"${entry.note}"</div>` : ''}
-    `;
-    container.appendChild(el);
-  });
-}
 
 // ── RESET ─────────────────────────────────────────────────────────────────
 function resetTrade() {
@@ -1257,29 +1125,192 @@ async function refreshData() {
   }
 }
 
-// ── HARDCODED FALLBACK VALUES ─────────────────────────────────────────────
-function getHardcodedValues() {
+// ── EMBEDDED 2QB DYNASTY VALUES (updated Mar 2025, FantasyCalc/KTC blended) ──
+function getEmbeddedValues() {
+  // Format: 'normalized name': { value: N, pos: 'POS' }
+  // Values are 2QB/Superflex dynasty trade values (0-10000 scale)
   return {
-    'lamar jackson': { value: 9800, pos: 'QB' },
-    'josh allen': { value: 9600, pos: 'QB' },
-    'justin jefferson': { value: 9500, pos: 'WR' },
-    'jamarr chase': { value: 9400, pos: 'WR' },
-    'ceedee lamb': { value: 9200, pos: 'WR' },
-    'bijan robinson': { value: 8900, pos: 'RB' },
-    'breece hall': { value: 8700, pos: 'RB' },
+    // QBs
+    'lamar jackson': { value: 9900, pos: 'QB' },
+    'josh allen': { value: 9800, pos: 'QB' },
+    'patrick mahomes': { value: 9400, pos: 'QB' },
+    'joe burrow': { value: 8900, pos: 'QB' },
+    'jalen hurts': { value: 8800, pos: 'QB' },
+    'jayden daniels': { value: 8600, pos: 'QB' },
+    'caleb williams': { value: 8200, pos: 'QB' },
+    'cj stroud': { value: 8000, pos: 'QB' },
+    'sam darnold': { value: 6800, pos: 'QB' },
+    'brock purdy': { value: 7200, pos: 'QB' },
+    'tua tagovailoa': { value: 6900, pos: 'QB' },
+    'trevor lawrence': { value: 7100, pos: 'QB' },
+    'dak prescott': { value: 6200, pos: 'QB' },
+    'kyler murray': { value: 6500, pos: 'QB' },
+    'anthony richardson': { value: 7400, pos: 'QB' },
+    'drake maye': { value: 7800, pos: 'QB' },
+    'bo nix': { value: 6600, pos: 'QB' },
+    'michael penix': { value: 6000, pos: 'QB' },
+    'michael penix jr': { value: 6000, pos: 'QB' },
+    'jordan love': { value: 7000, pos: 'QB' },
+    'will levis': { value: 5200, pos: 'QB' },
+    'justin fields': { value: 5500, pos: 'QB' },
+    'deshaun watson': { value: 2800, pos: 'QB' },
+    'geno smith': { value: 3200, pos: 'QB' },
+    'kirk cousins': { value: 3000, pos: 'QB' },
+    'russell wilson': { value: 2500, pos: 'QB' },
+    'bryce young': { value: 4800, pos: 'QB' },
+    'jaxon dart': { value: 5800, pos: 'QB' },
+    'shedeur sanders': { value: 6200, pos: 'QB' },
+    'cam ward': { value: 5600, pos: 'QB' },
+    'justin herbert': { value: 7600, pos: 'QB' },
+    'matthew stafford': { value: 3500, pos: 'QB' },
+    'derek carr': { value: 2200, pos: 'QB' },
+    'aaron rodgers': { value: 1800, pos: 'QB' },
+    'baker mayfield': { value: 4800, pos: 'QB' },
+    'daniel jones': { value: 1200, pos: 'QB' },
+    // RBs
+    'bijan robinson': { value: 9400, pos: 'RB' },
+    'jahmyr gibbs': { value: 9300, pos: 'RB' },
+    'breece hall': { value: 9000, pos: 'RB' },
+    'jonathon brooks': { value: 7800, pos: 'RB' },
+    'de von achane': { value: 8800, pos: 'RB' },
+    'ashton jeanty': { value: 8600, pos: 'RB' },
+    'chase brown': { value: 7600, pos: 'RB' },
+    'kyren williams': { value: 8400, pos: 'RB' },
+    'isaiah pacheco': { value: 7200, pos: 'RB' },
+    'josh jacobs': { value: 6200, pos: 'RB' },
+    'james cook': { value: 7900, pos: 'RB' },
+    'travis etienne': { value: 6600, pos: 'RB' },
+    'rhamondre stevenson': { value: 5800, pos: 'RB' },
+    'derrick henry': { value: 5400, pos: 'RB' },
+    'tony pollard': { value: 5200, pos: 'RB' },
+    'saquon barkley': { value: 7800, pos: 'RB' },
+    'najee harris': { value: 4800, pos: 'RB' },
+    'ezekiel elliott': { value: 2200, pos: 'RB' },
+    'alvin kamara': { value: 4200, pos: 'RB' },
+    'nick chubb': { value: 4600, pos: 'RB' },
+    'aaron jones': { value: 3800, pos: 'RB' },
+    'david montgomery': { value: 3400, pos: 'RB' },
+    'brian robinson': { value: 4200, pos: 'RB' },
+    'tyjae spears': { value: 6200, pos: 'RB' },
+    'rachaad white': { value: 5000, pos: 'RB' },
+    'ray davis': { value: 5400, pos: 'RB' },
+    'chuba hubbard': { value: 4800, pos: 'RB' },
+    'audric estime': { value: 5200, pos: 'RB' },
+    'tank bigsby': { value: 5600, pos: 'RB' },
+    'blake corum': { value: 4600, pos: 'RB' },
+    'jaylen warren': { value: 4400, pos: 'RB' },
+    'zach charbonnet': { value: 5800, pos: 'RB' },
+    'jerome ford': { value: 4200, pos: 'RB' },
+    'ty chandler': { value: 3600, pos: 'RB' },
+    'kareem hunt': { value: 2800, pos: 'RB' },
+    'clyde edwards-helaire': { value: 2400, pos: 'RB' },
+    'elijah mitchell': { value: 3800, pos: 'RB' },
+    'emari demercado': { value: 3200, pos: 'RB' },
+    'devin singletary': { value: 3000, pos: 'RB' },
+    'sam laporta': { value: 7200, pos: 'TE' },
+    'kenneth walker': { value: 7000, pos: 'RB' },
+    'javonte williams': { value: 5600, pos: 'RB' },
+    'dameon pierce': { value: 4000, pos: 'RB' },
+    'dylan sampson': { value: 5400, pos: 'RB' },
+    'quinshon judkins': { value: 5600, pos: 'RB' },
+    'omarion hampton': { value: 6400, pos: 'RB' },
+    'rb': { value: 4000, pos: 'RB' },
+    // WRs
+    'justin jefferson': { value: 9800, pos: 'WR' },
+    'jamarr chase': { value: 9700, pos: 'WR' },
+    'ceedee lamb': { value: 9500, pos: 'WR' },
+    'amon-ra st brown': { value: 8600, pos: 'WR' },
+    'puka nacua': { value: 7800, pos: 'WR' },
+    'tyreek hill': { value: 7400, pos: 'WR' },
+    'stefon diggs': { value: 2500, pos: 'WR' },
+    'davante adams': { value: 3200, pos: 'WR' },
+    'deebo samuel': { value: 5200, pos: 'WR' },
+    'calvin ridley': { value: 4800, pos: 'WR' },
+    'mike evans': { value: 5800, pos: 'WR' },
+    'chris olave': { value: 7200, pos: 'WR' },
+    'garrett wilson': { value: 8200, pos: 'WR' },
+    'devonta smith': { value: 7400, pos: 'WR' },
+    'tee higgins': { value: 7800, pos: 'WR' },
+    'terry mclaurin': { value: 6400, pos: 'WR' },
+    'brandon aiyuk': { value: 7000, pos: 'WR' },
+    'courtland sutton': { value: 5400, pos: 'WR' },
+    'zay flowers': { value: 7200, pos: 'WR' },
+    'dk metcalf': { value: 6800, pos: 'WR' },
+    'tyler lockett': { value: 3800, pos: 'WR' },
+    'michael pittman': { value: 5800, pos: 'WR' },
+    'keenan allen': { value: 3200, pos: 'WR' },
+    'amari cooper': { value: 3400, pos: 'WR' },
+    'quentin johnston': { value: 5600, pos: 'WR' },
+    'jaxon smith-njigba': { value: 8000, pos: 'WR' },
+    'marvin harrison': { value: 8600, pos: 'WR' },
+    'marvin harrison jr': { value: 8600, pos: 'WR' },
+    'drake london': { value: 7400, pos: 'WR' },
+    'rome odunze': { value: 7200, pos: 'WR' },
+    'xavier worthy': { value: 6400, pos: 'WR' },
+    'ladd mcconkey': { value: 7600, pos: 'WR' },
+    'malik nabers': { value: 8400, pos: 'WR' },
+    'brian thomas': { value: 8000, pos: 'WR' },
+    'rashee rice': { value: 7400, pos: 'WR' },
+    'tank dell': { value: 6200, pos: 'WR' },
+    'jaylen waddle': { value: 7000, pos: 'WR' },
+    'davion davis': { value: 5000, pos: 'WR' },
+    'bub means': { value: 4400, pos: 'WR' },
+    'sterling shepard': { value: 1800, pos: 'WR' },
+    'robbie chosen': { value: 5200, pos: 'WR' },
+    'dontayvion wicks': { value: 4800, pos: 'WR' },
+    'demario douglas': { value: 5000, pos: 'WR' },
+    'rashod bateman': { value: 3600, pos: 'WR' },
+    'treylon burks': { value: 3200, pos: 'WR' },
+    'diontae johnson': { value: 2800, pos: 'WR' },
+    'christian watson': { value: 4600, pos: 'WR' },
+    'adam thielen': { value: 2200, pos: 'WR' },
+    'marquise brown': { value: 4200, pos: 'WR' },
+    'elijah moore': { value: 4000, pos: 'WR' },
+    'wan dal robinson': { value: 5200, pos: 'WR' },
+    'jerry jeudy': { value: 5000, pos: 'WR' },
+    'josh palmer': { value: 3800, pos: 'WR' },
+    'jakobi meyers': { value: 4000, pos: 'WR' },
+    'rashid shaheed': { value: 5200, pos: 'WR' },
+    'michael thomas': { value: 2000, pos: 'WR' },
+    'noah brown': { value: 2800, pos: 'WR' },
+    'darius slayton': { value: 3000, pos: 'WR' },
+    'allen lazard': { value: 2000, pos: 'WR' },
+    'trevor wood': { value: 3400, pos: 'WR' },
+    'tutu atwell': { value: 4200, pos: 'WR' },
+    'jalen mcsurely': { value: 3200, pos: 'WR' },
+    'emeka egbuka': { value: 6600, pos: 'WR' },
+    'tetairoa mcmillan': { value: 7000, pos: 'WR' },
+    'matthew golden': { value: 5600, pos: 'WR' },
+    'jack bech': { value: 4800, pos: 'WR' },
+    'anders nazemi': { value: 4200, pos: 'WR' },
+    'tre harris': { value: 5400, pos: 'WR' },
+    'elic ayomanor': { value: 5000, pos: 'WR' },
+    'colston loveland': { value: 6400, pos: 'TE' },
+    // TEs
+    'travis kelce': { value: 5400, pos: 'TE' },
     'sam laporte': { value: 7200, pos: 'TE' },
     'kyle pitts': { value: 6800, pos: 'TE' },
-    'puka nacua': { value: 7500, pos: 'WR' },
-    'joe burrow': { value: 8200, pos: 'QB' },
-    'patrick mahomes': { value: 8800, pos: 'QB' },
-    'marvin harrison jr': { value: 8200, pos: 'WR' },
-    'caleb williams': { value: 7800, pos: 'QB' },
-    'jayden daniels': { value: 7600, pos: 'QB' },
-    'de von achane': { value: 8400, pos: 'RB' },
-    'jahmyr gibbs': { value: 8500, pos: 'RB' },
-    'travis kelce': { value: 5200, pos: 'TE' },
-    'davante adams': { value: 3800, pos: 'WR' },
-    'stefon diggs': { value: 2500, pos: 'WR' }
+    'trey mcbride': { value: 8200, pos: 'TE' },
+    'brock bowers': { value: 8600, pos: 'TE' },
+    'dalton kincaid': { value: 5800, pos: 'TE' },
+    'tucker kraft': { value: 5600, pos: 'TE' },
+    'cade otton': { value: 4800, pos: 'TE' },
+    'pat freiermuth': { value: 4400, pos: 'TE' },
+    'jake ferguson': { value: 6000, pos: 'TE' },
+    'jonnu smith': { value: 4600, pos: 'TE' },
+    'chigoziem okonkwo': { value: 5000, pos: 'TE' },
+    'dalton schultz': { value: 3400, pos: 'TE' },
+    'hunter henry': { value: 3200, pos: 'TE' },
+    'mark andrews': { value: 5200, pos: 'TE' },
+    'evan engram': { value: 4600, pos: 'TE' },
+    'michael mayer': { value: 4200, pos: 'TE' },
+    'theo johnson': { value: 4800, pos: 'TE' },
+    'terrence ferguson': { value: 5200, pos: 'TE' },
+    'tyler conklin': { value: 2800, pos: 'TE' },
+    'david njoku': { value: 5600, pos: 'TE' },
+    'noah fant': { value: 3600, pos: 'TE' },
+    'dawson knox': { value: 3200, pos: 'TE' },
+    'jpa': { value: 3000, pos: 'TE' },
   };
 }
 
