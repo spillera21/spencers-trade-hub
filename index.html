@@ -742,47 +742,68 @@ async function loadSleeperPlayers() {
 async function loadDraftSlots() {
   try {
     const drafts = await apiFetch(`league/${LEAGUE_ID}/drafts`);
-    if (!drafts || !drafts.length) return;
+    console.log('[DRAFT DEBUG] All drafts returned:', JSON.stringify(drafts));
+    if (!drafts || !drafts.length) { console.warn('[DRAFT DEBUG] No drafts found'); return; }
 
     const currentYear = new Date().getFullYear();
-    // Find the most recent non-completed draft (upcoming rookie draft)
-    // Sleeper stores season as string e.g. "2026"
-    // Try current year first, fall back to most recent
-    let rookieDraft = drafts.find(d =>
-      parseInt(d.season) === currentYear && d.type === 'rookie' && d.status !== 'complete'
-    );
-    if (!rookieDraft) rookieDraft = drafts.find(d =>
-      parseInt(d.season) === currentYear && d.status !== 'complete'
-    );
-    if (!rookieDraft) rookieDraft = drafts.find(d =>
-      parseInt(d.season) === currentYear
-    );
-    if (!rookieDraft) {
-      // Fall back to most recent draft of any year
-      rookieDraft = drafts.sort((a,b) => parseInt(b.season) - parseInt(a.season))[0];
-    }
 
-    if (!rookieDraft) return;
+    // Log all drafts for visibility
+    drafts.forEach(d => console.log(`[DRAFT DEBUG] draft_id=${d.draft_id} season=${d.season} type=${d.type} status=${d.status}`));
+
+    // Pick the right draft: current year rookie draft, prefer pre-draft or in-progress over complete
+    let rookieDraft =
+      drafts.find(d => parseInt(d.season) === currentYear && d.type === 'rookie' && d.status === 'pre_draft') ||
+      drafts.find(d => parseInt(d.season) === currentYear && d.type === 'rookie' && d.status === 'drafting') ||
+      drafts.find(d => parseInt(d.season) === currentYear && d.type === 'rookie') ||
+      drafts.find(d => parseInt(d.season) === currentYear && d.status !== 'complete') ||
+      drafts.find(d => parseInt(d.season) === currentYear) ||
+      [...drafts].sort((a,b) => parseInt(b.season) - parseInt(a.season))[0];
+
+    if (!rookieDraft) { console.warn('[DRAFT DEBUG] Could not find suitable draft'); return; }
 
     draftYear = parseInt(rookieDraft.season);
-    console.log('Found draft:', rookieDraft.draft_id, 'season:', rookieDraft.season, 'status:', rookieDraft.status);
+    console.log('[DRAFT DEBUG] Using draft:', rookieDraft.draft_id, 'season:', rookieDraft.season, 'status:', rookieDraft.status, 'type:', rookieDraft.type);
 
+    // slot_to_roster_id: { "1": rosterId, "2": rosterId, ... }
     const slotToRoster = rookieDraft.slot_to_roster_id || {};
-    console.log('slot_to_roster_id raw:', slotToRoster);
+    console.log('[DRAFT DEBUG] slot_to_roster_id:', JSON.stringify(slotToRoster));
+    console.log('[DRAFT DEBUG] draft_order:', JSON.stringify(rookieDraft.draft_order));
 
-    // Invert: rosterId (as string AND int) -> slot number
-    // Sleeper may return roster IDs as numbers — normalize everything to strings
-    const rosterToSlot = {};
+    // If slot_to_roster_id is empty, try draft_order (some leagues use this instead)
+    // draft_order: { userId: slotNumber }
+    let sourceMap = slotToRoster;
+    let inverted = false;
+
+    if (!Object.keys(slotToRoster).length && rookieDraft.draft_order) {
+      console.log('[DRAFT DEBUG] slot_to_roster_id empty, trying draft_order');
+      // draft_order maps userId -> slot, we need rosterId -> slot
+      // Cross-reference with users list
+      const userToRoster = {};
+      users.forEach(u => {
+        const r = rosters.find(r => r.owner_id === u.user_id);
+        if (r) userToRoster[u.user_id] = r.roster_id;
+      });
+      Object.entries(rookieDraft.draft_order).forEach(([userId, slot]) => {
+        const rId = userToRoster[userId];
+        if (rId) {
+          draftSlotMap[String(rId)] = parseInt(slot);
+          draftSlotMap[rId] = parseInt(slot);
+        }
+      });
+      console.log('[DRAFT DEBUG] draftSlotMap from draft_order:', JSON.stringify(draftSlotMap));
+      return;
+    }
+
+    // Invert slot_to_roster_id: { "1": rId } -> { rId: 1 }
     Object.entries(slotToRoster).forEach(([slot, rId]) => {
-      // Store under both string and int keys to avoid type mismatch
-      rosterToSlot[String(rId)] = parseInt(slot);
-      rosterToSlot[parseInt(rId)] = parseInt(slot);
+      draftSlotMap[String(rId)] = parseInt(slot);
+      draftSlotMap[rId] = parseInt(slot);
     });
 
-    draftSlotMap = rosterToSlot;
-    console.log('draftSlotMap built:', draftSlotMap);
+    console.log('[DRAFT DEBUG] Final draftSlotMap:', JSON.stringify(draftSlotMap));
+    console.log('[DRAFT DEBUG] Roster IDs in league:', rosters.map(r => r.roster_id));
   } catch(e) {
-    console.warn('Could not load draft slots:', e.message);
+    console.error('[DRAFT DEBUG] Error:', e.message, e.stack);
   }
 }
 
@@ -947,7 +968,7 @@ function getFuturePicks(rosterId) {
 
   // Step 2: add my own picks for each year/round, skip ones I traded away
   const years = [currentYear, currentYear + 1, currentYear + 2];
-  const rounds = [1, 2, 3];
+  const rounds = [1, 2]; // league uses 2-round rookie drafts only
   years.forEach(yr => {
     rounds.forEach(rnd => {
       const tradeKey = `${yr}-${rnd}`;
