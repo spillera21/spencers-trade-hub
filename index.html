@@ -776,21 +776,40 @@ async function loadDraftSlots() {
 
     if (!Object.keys(slotToRoster).length && rookieDraft.draft_order) {
       console.log('[DRAFT DEBUG] slot_to_roster_id empty, trying draft_order');
-      // draft_order maps userId -> slot, we need rosterId -> slot
-      // Cross-reference with users list
-      const userToRoster = {};
-      users.forEach(u => {
-        const r = rosters.find(r => r.owner_id === u.user_id);
-        if (r) userToRoster[u.user_id] = r.roster_id;
-      });
-      Object.entries(rookieDraft.draft_order).forEach(([userId, slot]) => {
-        const rId = userToRoster[userId];
-        if (rId) {
+      // Sleeper draft_order can be EITHER:
+      //   A) { userId: slotNumber } — user ID maps to their draft slot
+      //   B) { slotNumber: rosterId } — slot number maps to roster ID
+      // Detect which format by checking if keys look like user IDs (long numbers) or slot numbers (1-8)
+      const entries = Object.entries(rookieDraft.draft_order);
+      const firstKey = entries[0]?.[0] || '';
+      const isUserIdFormat = firstKey.length > 6; // user IDs are 18-digit strings, slots are 1-8
+
+      if (isUserIdFormat) {
+        // Format A: { userId: slot } — need to map userId -> rosterId first
+        console.log('[DRAFT DEBUG] draft_order format: userId->slot');
+        const userToRoster = {};
+        users.forEach(u => {
+          const r = rosters.find(r => r.owner_id === u.user_id);
+          if (r) userToRoster[String(u.user_id)] = r.roster_id;
+        });
+        entries.forEach(([userId, slot]) => {
+          const rId = userToRoster[String(userId)];
+          if (rId !== undefined) {
+            draftSlotMap[String(rId)] = parseInt(slot);
+            draftSlotMap[parseInt(rId)] = parseInt(slot);
+          }
+        });
+      } else {
+        // Format B: { slot: rosterId } — just invert it directly
+        console.log('[DRAFT DEBUG] draft_order format: slot->rosterId');
+        entries.forEach(([slot, rId]) => {
           draftSlotMap[String(rId)] = parseInt(slot);
-          draftSlotMap[rId] = parseInt(slot);
-        }
-      });
-      console.log('[DRAFT DEBUG] draftSlotMap from draft_order:', JSON.stringify(draftSlotMap));
+          draftSlotMap[parseInt(rId)] = parseInt(slot);
+        });
+      }
+
+      console.log('[DRAFT DEBUG] Final draftSlotMap:', JSON.stringify(draftSlotMap));
+      console.log('[DRAFT DEBUG] Roster IDs in league:', rosters.map(r => r.roster_id));
       return;
     }
 
