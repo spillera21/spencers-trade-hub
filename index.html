@@ -203,13 +203,19 @@
     color: var(--text-muted);
     margin-top: 1px;
   }
-  .player-value {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text-muted);
+  .player-tier {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    padding: 3px 7px;
+    border-radius: 20px;
     flex-shrink: 0;
   }
-  .player-card.selected .player-value { color: var(--accent); }
+  .tier-elite { background: rgba(79,127,255,0.18); color: #7aa3ff; }
+  .tier-high  { background: rgba(34,197,94,0.15); color: #4ade80; }
+  .tier-mid   { background: rgba(245,158,11,0.15); color: #fbbf24; }
+  .tier-low   { background: rgba(107,114,128,0.15); color: #9ca3af; }
+  .tier-none  { background: rgba(107,114,128,0.08); color: #55556a; }
   .checkmark {
     width: 18px; height: 18px;
     border-radius: 50%;
@@ -718,6 +724,26 @@ function getPlayerInfo(pid) {
   };
 }
 
+function getTierLabel(val) {
+  // 8-team superflex tiers — QB premium slightly reduced vs 12-team
+  if (val >= 8500) return { label: 'Elite', cls: 'player-tier tier-elite' };
+  if (val >= 6500) return { label: 'High', cls: 'player-tier tier-high' };
+  if (val >= 4000) return { label: 'Mid', cls: 'player-tier tier-mid' };
+  if (val >= 1500) return { label: 'Low', cls: 'player-tier tier-low' };
+  return { label: '–', cls: 'player-tier tier-none' };
+}
+
+function getPickTierLabel(round, season) {
+  const yr = parseInt(season) || 2026;
+  const now = new Date().getFullYear();
+  const future = yr - now;
+  const r = parseInt(round) || 1;
+  if (r === 1 && future <= 1) return 'High value pick';
+  if (r === 1) return 'Mid value pick';
+  if (r === 2 && future <= 1) return 'Mid value pick';
+  return 'Low value pick';
+}
+
 function getPlayerValue(pid) {
   const info = getPlayerInfo(pid);
   const key = normalizeName(info.name);
@@ -823,13 +849,15 @@ function buildPlayerCard(pid, side, isFriend) {
   const posClass = `pos-${info.pos}`;
   const valDisplay = val > 0 ? val.toLocaleString() : '–';
 
+  const tier = getTierLabel(val);
+  card.dataset.val = val;
   card.innerHTML = `
     <div class="pos-badge ${posClass}">${info.pos}</div>
     <div class="player-info">
       <div class="player-name">${info.name}</div>
       <div class="player-meta">${info.team}${info.age ? ' · Age ' + info.age : ''}</div>
     </div>
-    <div class="player-value">${valDisplay}</div>
+    <div class="player-tier ${tier.cls}">${tier.label}</div>
     <div class="checkmark"><svg width="10" height="8" viewBox="0 0 10 8" fill="none"><path d="M1 4l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round"/></svg></div>
   `;
 
@@ -850,12 +878,12 @@ function buildPickCard(pick, side) {
     <div class="pos-badge pos-PICK">PICK</div>
     <div class="player-info">
       <div class="player-name">${label}</div>
-      <div class="player-meta">Draft pick · ${val.toLocaleString()} pts</div>
+      <div class="player-meta">Draft pick · ${getPickTierLabel(pick.round, pick.season)}</div>
     </div>
-    <div class="player-value">${val.toLocaleString()}</div>
     <div class="checkmark"><svg width="10" height="8" viewBox="0 0 10 8" fill="none"><path d="M1 4l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round"/></svg></div>
   `;
 
+  card.dataset.val = val;
   card.addEventListener('click', () => togglePlayer(pick.id, side, card, label, val, 'pick'));
   return card;
 }
@@ -935,10 +963,9 @@ function updateChipsFor(side, set, container, counter) {
     const isPick = pid.startsWith('pick_');
     let name, val;
     if(isPick) {
-      // Reconstruct from card data
       const card = document.querySelector(`[data-pid="${pid}"]`);
       name = card?.querySelector('.player-name')?.textContent || 'Pick';
-      val = parseInt(card?.querySelector('.player-value')?.textContent?.replace(/,/g,'')) || 0;
+      val = parseInt(card?.dataset?.val) || 0;
     } else {
       const info = getPlayerInfo(pid);
       name = info.name;
@@ -980,8 +1007,8 @@ function evaluateTrade() {
     const isPick = pid.startsWith('pick_');
     let val, name;
     if(isPick) {
-      const card = document.querySelector(`[data-pid="${pid}"]`);
-      val = parseInt(card?.querySelector('.player-value')?.textContent?.replace(/,/g,'')) || 0;
+      const card = document.querySelector(`[data-pid="${pid}"][data-side="give"]`);
+      val = parseInt(card?.dataset?.val) || 0;
       name = card?.querySelector('.player-name')?.textContent || 'Pick';
     } else {
       val = getPlayerValue(pid);
@@ -995,8 +1022,8 @@ function evaluateTrade() {
     const isPick = pid.startsWith('pick_');
     let val, name;
     if(isPick) {
-      const card = document.querySelector(`[data-pid="${pid}"]`);
-      val = parseInt(card?.querySelector('.player-value')?.textContent?.replace(/,/g,'')) || 0;
+      const card = document.querySelector(`[data-pid="${pid}"][data-side="receive"]`);
+      val = parseInt(card?.dataset?.val) || 0;
       name = card?.querySelector('.player-name')?.textContent || 'Pick';
     } else {
       val = getPlayerValue(pid);
@@ -1125,7 +1152,9 @@ async function refreshData() {
   }
 }
 
-// ── EMBEDDED 2QB DYNASTY VALUES (updated Mar 2025, FantasyCalc/KTC blended) ──
+// ── EMBEDDED 2QB DYNASTY VALUES — calibrated for 8-team superflex ──
+// In 8-team leagues: QB premium is lower (more QBs available), depth is less scarce.
+// Elites still near 10k; mid-tier QBs pulled down ~10-15% vs 12-team values.
 function getEmbeddedValues() {
   // Format: 'normalized name': { value: N, pos: 'POS' }
   // Values are 2QB/Superflex dynasty trade values (0-10000 scale)
@@ -1139,7 +1168,7 @@ function getEmbeddedValues() {
     'jayden daniels': { value: 8600, pos: 'QB' },
     'caleb williams': { value: 8200, pos: 'QB' },
     'cj stroud': { value: 8000, pos: 'QB' },
-    'sam darnold': { value: 6800, pos: 'QB' },
+    'sam darnold': { value: 5800, pos: 'QB' },
     'brock purdy': { value: 7200, pos: 'QB' },
     'tua tagovailoa': { value: 6900, pos: 'QB' },
     'trevor lawrence': { value: 7100, pos: 'QB' },
@@ -1151,21 +1180,26 @@ function getEmbeddedValues() {
     'michael penix': { value: 6000, pos: 'QB' },
     'michael penix jr': { value: 6000, pos: 'QB' },
     'jordan love': { value: 7000, pos: 'QB' },
-    'will levis': { value: 5200, pos: 'QB' },
-    'justin fields': { value: 5500, pos: 'QB' },
+    'will levis': { value: 4400, pos: 'QB' },
+    'justin fields': { value: 4600, pos: 'QB' },
     'deshaun watson': { value: 2800, pos: 'QB' },
     'geno smith': { value: 3200, pos: 'QB' },
     'kirk cousins': { value: 3000, pos: 'QB' },
     'russell wilson': { value: 2500, pos: 'QB' },
-    'bryce young': { value: 4800, pos: 'QB' },
+    'bryce young': { value: 4000, pos: 'QB' },
     'jaxon dart': { value: 5800, pos: 'QB' },
     'shedeur sanders': { value: 6200, pos: 'QB' },
     'cam ward': { value: 5600, pos: 'QB' },
     'justin herbert': { value: 7600, pos: 'QB' },
+    'jared goff': { value: 5800, pos: 'QB' },
+    'tyler shough': { value: 4200, pos: 'QB' },
+    'sam howell': { value: 3800, pos: 'QB' },
+    'mac jones': { value: 2800, pos: 'QB' },
+    'andy dalton': { value: 1800, pos: 'QB' },
     'matthew stafford': { value: 3500, pos: 'QB' },
     'derek carr': { value: 2200, pos: 'QB' },
     'aaron rodgers': { value: 1800, pos: 'QB' },
-    'baker mayfield': { value: 4800, pos: 'QB' },
+    'baker mayfield': { value: 4000, pos: 'QB' },
     'daniel jones': { value: 1200, pos: 'QB' },
     // RBs
     'bijan robinson': { value: 9400, pos: 'RB' },
@@ -1214,6 +1248,21 @@ function getEmbeddedValues() {
     'dylan sampson': { value: 5400, pos: 'RB' },
     'quinshon judkins': { value: 5600, pos: 'RB' },
     'omarion hampton': { value: 6400, pos: 'RB' },
+    'christian mccaffrey': { value: 6200, pos: 'RB' },
+    'jonathan taylor': { value: 6800, pos: 'RB' },
+    'trey benson': { value: 5000, pos: 'RB' },
+    'tyrone tracy': { value: 5200, pos: 'RB' },
+    'rj harvey': { value: 5400, pos: 'RB' },
+    'kaleb johnson': { value: 4800, pos: 'RB' },
+    'jo jo earl': { value: 3600, pos: 'RB' },
+    'trelon smith': { value: 3000, pos: 'RB' },
+    'jaylen wright': { value: 4200, pos: 'RB' },
+    'elijah hubbard': { value: 3800, pos: 'RB' },
+    'cam skattebo': { value: 5600, pos: 'RB' },
+    'treveyon henderson': { value: 5400, pos: 'RB' },
+    'ollie gordon': { value: 4800, pos: 'RB' },
+    'bhayshul tuten': { value: 4000, pos: 'RB' },
+    'willis mcgahee': { value: 1000, pos: 'RB' },
     'rb': { value: 4000, pos: 'RB' },
     // WRs
     'justin jefferson': { value: 9800, pos: 'WR' },
