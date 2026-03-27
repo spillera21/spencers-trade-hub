@@ -595,6 +595,7 @@ let mySelectedReceive = new Set();
 let currentFriendRosterId = null;
 let commUnlocked = false;
 let lastResultData = null;
+let draftSlotMap = {}; // rosterId -> { round -> pickSlot } for current year
 
 // ── INIT ──────────────────────────────────────────────────────────────────
 async function init() {
@@ -604,6 +605,9 @@ async function init() {
 
     setLoadStep('Loading league rosters...');
     await loadLeague();
+
+    setLoadStep('Loading draft slots...');
+    await loadDraftSlots();
 
     setLoadStep('Done!');
     await new Promise(r => setTimeout(r, 300));
@@ -734,6 +738,34 @@ async function loadSleeperPlayers() {
   }
 }
 
+async function loadDraftSlots() {
+  // Fetch the current year's rookie/upcoming draft to get exact pick slots
+  // slot_to_roster_id tells us which draft position (1-8) belongs to which roster
+  try {
+    const drafts = await apiFetch(`league/${LEAGUE_ID}/drafts`);
+    const currentYear = new Date().getFullYear().toString();
+    // Find the upcoming/in-progress rookie draft for this season
+    const rookieDraft = drafts.find(d =>
+      d.season === currentYear && d.status !== 'complete'
+    ) || drafts.find(d => d.season === currentYear);
+
+    if (!rookieDraft) return;
+
+    const slotToRoster = rookieDraft.slot_to_roster_id || {};
+    // Invert: rosterId -> slot number (1-8)
+    const rosterToSlot = {};
+    Object.entries(slotToRoster).forEach(([slot, rosterId]) => {
+      rosterToSlot[rosterId] = parseInt(slot);
+    });
+
+    // Build draftSlotMap: rosterId -> pick slot number for current year
+    draftSlotMap = rosterToSlot;
+    console.log('Draft slots loaded:', draftSlotMap);
+  } catch(e) {
+    console.warn('Could not load draft slots:', e.message);
+  }
+}
+
 async function apiFetch(path) {
   const r = await fetch(`https://api.sleeper.app/v1/${path}`);
   if(!r.ok) throw new Error('API error: ' + r.status);
@@ -793,19 +825,55 @@ function getPickValue(pick) {
   const year = parseInt(pick.season) || 2026;
   const round = parseInt(pick.round) || 1;
   const currentYear = new Date().getFullYear();
-  const yearDiscount = Math.max(0, (year - currentYear) * 0.15);
-  const baseValues = { 1: 4200, 2: 2800, 3: 1800, 4: 1100, 5: 700 };
-  const base = baseValues[round] || 400;
-  const sub = pick.slot?.toLowerCase() || 'mid';
-  const slotMod = sub === 'early' ? 1.25 : sub === 'late' ? 0.75 : 1.0;
+  const leagueSize = pick.leagueSize || 8;
+
+  // Year discount: picks 1yr out worth ~15% less, 2yr out ~28% less
+  const yearsOut = Math.max(0, year - currentYear);
+  const yearDiscount = yearsOut === 0 ? 0 : yearsOut === 1 ? 0.15 : 0.28;
+
+  // Base values for 8-team superflex rookie draft by round
+  const baseValues = { 1: 4800, 2: 2800, 3: 1600 };
+  const base = baseValues[round] || 500;
+
+  let slotMod = 1.0;
+  if (pick.slotNum) {
+    // Exact slot: top 2 picks are premium, bottom 2 are discounted
+    const slot = pick.slotNum;
+    if (slot <= 2)             slotMod = 1.35;
+    else if (slot <= 4)        slotMod = 1.10;
+    else if (slot <= 6)        slotMod = 0.90;
+    else                       slotMod = 0.72;
+  } else {
+    // Unknown slot — treat as middle of the board
+    slotMod = 1.0;
+  }
+
   return Math.round(base * slotMod * (1 - yearDiscount));
 }
 
 function getPickLabel(pick) {
   const year = pick.season || '?';
-  const round = pick.round || '?';
-  const sub = pick.slot || '';
-  return `${year} Round ${round}${sub ? ' (' + sub + ')' : ''} Pick`;
+  const round = parseInt(pick.round) || 1;
+  const size = pick.leagueSize || 8;
+
+  if (pick.slotNum) {
+    // Format as R.SS — e.g. 1.06 for round 1 pick 6
+    const slot = String(pick.slotNum).padStart(2, '0');
+    const label = `${year} ${round}.${slot}`;
+    // If it's a traded pick from another team, note who it came from
+    if (!pick.isOwn && pick.originalTeamName) {
+      return `${label} (via ${pick.originalTeamName})`;
+    }
+    return label;
+  }
+
+  // No slot known — show early/mid/late based on position within league
+  // For future years we don't know standings yet so show round only
+  const roundStr = `${year} Round ${round}`;
+  if (!pick.isOwn && pick.originalTeamName) {
+    return `${roundStr} (via ${pick.originalTeamName})`;
+  }
+  return roundStr;
 }
 
 // ── RENDER MY ROSTER ──────────────────────────────────────────────────────
@@ -837,24 +905,80 @@ function renderMyRoster() {
 
 function getFuturePicks(rosterId) {
   const currentYear = new Date().getFullYear();
+  const leagueSize = rosters.length || 8;
   const picks = [];
   const seen = new Set();
 
-  // Original picks (not traded away)
-  const tradedAway = new Set(tradedPicks
-    .filter(p => p.previous_owner_id === rosterId)
-    .map(p => `${p.season}-${p.round}-${p.original_user_id}`));
+  // Build full set of picks this roster owns (traded picks tell us ownership)
+  // tradedPicks contains all picks that have been traded at least once
+  const tradedToMe = new Set();
+  const tradedAwayFromMe = new Set();
 
-  // Picks traded TO this roster
+  tradedPicks.forEach(p => {
+    const key = `${p.season}-${p.round}-${p.roster_id}`; // original team's pick
+    if (p.owner_id === rosterId && parseInt(p.season) >= currentYear) {
+      tradedToMe.add(key);
+    }
+    if (p.previous_owner_id === rosterId && parseInt(p.season) >= currentYear) {
+      tradedAwayFromMe.add(key);
+    }
+  });
+
+  // Each roster originally owns their own picks for each round/year
+  // Add own picks that haven't been traded away
+  const years = [currentYear, currentYear + 1, currentYear + 2];
+  const rounds = [1, 2, 3]; // typical dynasty rookie draft rounds
+
+  years.forEach(yr => {
+    rounds.forEach(rnd => {
+      const key = `${yr}-${rnd}-${rosterId}`;
+      if (!tradedAwayFromMe.has(key) && !seen.has(key)) {
+        seen.add(key);
+        // Get exact slot if available (current year only)
+        const slotNum = (yr === currentYear && draftSlotMap[rosterId]) ? draftSlotMap[rosterId] : null;
+        picks.push({
+          season: yr.toString(),
+          round: rnd,
+          slotNum,        // exact draft position (1-8) or null
+          leagueSize,
+          id: `pick_${key}`,
+          originalRosterId: rosterId,
+          isOwn: true
+        });
+      }
+    });
+  });
+
+  // Add picks traded to this roster
   tradedPicks
     .filter(p => p.owner_id === rosterId && parseInt(p.season) >= currentYear)
     .forEach(p => {
-      const key = `${p.season}-${p.round}-${p.owner_id}`;
-      if(!seen.has(key)) {
+      const key = `${p.season}-${p.round}-${p.roster_id}`;
+      if (!seen.has(key)) {
         seen.add(key);
-        picks.push({ season: p.season, round: p.round, slot: '', id: 'pick_' + key, isTraded: true });
+        // Get slot for the original owner if current year
+        const slotNum = (parseInt(p.season) === currentYear && draftSlotMap[p.roster_id])
+          ? draftSlotMap[p.roster_id] : null;
+        const originalTeam = rosters.find(r => r.roster_id === p.roster_id);
+        picks.push({
+          season: p.season,
+          round: p.round,
+          slotNum,
+          leagueSize,
+          id: `pick_${key}`,
+          originalRosterId: p.roster_id,
+          originalTeamName: originalTeam?.teamName || null,
+          isOwn: false
+        });
       }
     });
+
+  // Sort: current year first, then by round, then by slot
+  picks.sort((a, b) => {
+    if (a.season !== b.season) return parseInt(a.season) - parseInt(b.season);
+    if (a.round !== b.round) return a.round - b.round;
+    return (a.slotNum || 99) - (b.slotNum || 99);
+  });
 
   return picks;
 }
@@ -1197,6 +1321,7 @@ async function refreshData() {
   try {
     await loadDynastyValues();
     await loadLeague();
+    await loadDraftSlots();
     renderMyRoster();
     const rid = currentFriendRosterId;
     if(rid) loadFriendRoster();
