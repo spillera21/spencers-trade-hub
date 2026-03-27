@@ -203,19 +203,17 @@
     color: var(--text-muted);
     margin-top: 1px;
   }
-  .player-tier {
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 0.4px;
-    padding: 3px 7px;
-    border-radius: 20px;
+  .player-val-display {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
     flex-shrink: 0;
+    min-width: 36px;
+    text-align: right;
+    display: none;
   }
-  .tier-elite { background: rgba(79,127,255,0.18); color: #7aa3ff; }
-  .tier-high  { background: rgba(34,197,94,0.15); color: #4ade80; }
-  .tier-mid   { background: rgba(245,158,11,0.15); color: #fbbf24; }
-  .tier-low   { background: rgba(107,114,128,0.15); color: #9ca3af; }
-  .tier-none  { background: rgba(107,114,128,0.08); color: #55556a; }
+  .comm-mode .player-val-display { display: block; }
+  .player-card.selected .player-val-display { color: var(--accent); }
   .checkmark {
     width: 18px; height: 18px;
     border-radius: 50%;
@@ -601,8 +599,8 @@ let lastResultData = null;
 // ── INIT ──────────────────────────────────────────────────────────────────
 async function init() {
   try {
-    setLoadStep('Loading dynasty values...');
-    dpValues = getEmbeddedValues();
+    setLoadStep('Fetching live dynasty values...');
+    await loadDynastyValues();
 
     setLoadStep('Loading league rosters...');
     await loadLeague();
@@ -629,6 +627,36 @@ function setLoadStep(msg) {
 }
 
 // ── DATA LOADING ──────────────────────────────────────────────────────────
+async function loadDynastyValues() {
+  // Try FantasyCalc public API first — covers every rostered NFL player, updated weekly
+  // superflex=true gives 2QB values; ppr=1 for full PPR
+  try {
+    const r = await fetch('https://api.fantasycalc.com/values/current?isDynasty=true&numQbs=2&ppr=1&numTeams=8');
+    if (r.ok) {
+      const data = await r.json();
+      data.forEach(entry => {
+        const p = entry.player;
+        const key = normalizeName(p.name);
+        dpValues[key] = {
+          name: p.name,
+          value: entry.value || 0,
+          pos: p.position || '?',
+          team: p.mayflowerTeam || '',
+          age: p.age || null,
+          sleeperId: p.sleeperId || null,
+        };
+        // Also index by sleeper ID for direct lookup
+        if (p.sleeperId) dpValues['sid_' + p.sleeperId] = dpValues[key];
+      });
+      console.log('FantasyCalc loaded:', Object.keys(dpValues).length, 'players');
+      return;
+    }
+  } catch(e) {
+    console.warn('FantasyCalc API failed, using fallback:', e.message);
+  }
+  // Fallback: large embedded table
+  dpValues = getEmbeddedValues();
+}
 
 function normalizeName(n) {
   return (n || '').toLowerCase()
@@ -724,14 +752,7 @@ function getPlayerInfo(pid) {
   };
 }
 
-function getTierLabel(val) {
-  // 8-team superflex tiers — QB premium slightly reduced vs 12-team
-  if (val >= 8500) return { label: 'Elite', cls: 'player-tier tier-elite' };
-  if (val >= 6500) return { label: 'High', cls: 'player-tier tier-high' };
-  if (val >= 4000) return { label: 'Mid', cls: 'player-tier tier-mid' };
-  if (val >= 1500) return { label: 'Low', cls: 'player-tier tier-low' };
-  return { label: '–', cls: 'player-tier tier-none' };
-}
+
 
 function getPickTierLabel(round, season) {
   const yr = parseInt(season) || 2026;
@@ -745,13 +766,23 @@ function getPickTierLabel(round, season) {
 }
 
 function getPlayerValue(pid) {
+  // Try direct Sleeper ID lookup first (most accurate)
+  const byId = dpValues['sid_' + pid];
+  if (byId) return byId.value;
+
   const info = getPlayerInfo(pid);
+  if (!info || info.name === 'Unknown') return 0;
   const key = normalizeName(info.name);
+
+  // Exact name match
   const dp = dpValues[key];
-  if(dp) return dp.value;
-  // Try fuzzy match
-  for(const k in dpValues) {
-    if(k.includes(normalizeName(info.name.split(' ').pop())) && Math.abs(k.length - key.length) <= 4) {
+  if (dp) return dp.value;
+
+  // Fuzzy: last name + position match
+  const lastName = normalizeName(info.name.split(' ').slice(-1)[0]);
+  for (const k in dpValues) {
+    if (k.startsWith('sid_')) continue;
+    if (dpValues[k].pos === info.pos && k.includes(lastName) && Math.abs(k.length - key.length) <= 5) {
       return dpValues[k].value;
     }
   }
@@ -847,9 +878,6 @@ function buildPlayerCard(pid, side, isFriend) {
   card.dataset.side = side;
 
   const posClass = `pos-${info.pos}`;
-  const valDisplay = val > 0 ? val.toLocaleString() : '–';
-
-  const tier = getTierLabel(val);
   card.dataset.val = val;
   card.innerHTML = `
     <div class="pos-badge ${posClass}">${info.pos}</div>
@@ -857,7 +885,7 @@ function buildPlayerCard(pid, side, isFriend) {
       <div class="player-name">${info.name}</div>
       <div class="player-meta">${info.team}${info.age ? ' · Age ' + info.age : ''}</div>
     </div>
-    <div class="player-tier ${tier.cls}">${tier.label}</div>
+    <div class="player-val-display" data-val="${val}"></div>
     <div class="checkmark"><svg width="10" height="8" viewBox="0 0 10 8" fill="none"><path d="M1 4l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round"/></svg></div>
   `;
 
@@ -878,8 +906,9 @@ function buildPickCard(pick, side) {
     <div class="pos-badge pos-PICK">PICK</div>
     <div class="player-info">
       <div class="player-name">${label}</div>
-      <div class="player-meta">Draft pick · ${getPickTierLabel(pick.round, pick.season)}</div>
+      <div class="player-meta">Draft pick</div>
     </div>
+    <div class="player-val-display" data-val="${val}"></div>
     <div class="checkmark"><svg width="10" height="8" viewBox="0 0 10 8" fill="none"><path d="M1 4l3 3 5-5" stroke="white" stroke-width="1.8" stroke-linecap="round"/></svg></div>
   `;
 
@@ -1079,20 +1108,46 @@ function getVerdict(diff) {
 }
 
 // ── COMMISSIONER VIEW ─────────────────────────────────────────────────────
+let autoLockTimer = null;
+
 function checkPw() {
   const pw = document.getElementById('comm-pw').value;
   const errEl = document.getElementById('pw-error');
   if(pw === COMMISSIONER_PW) {
     commUnlocked = true;
     errEl.style.display = 'none';
-    document.getElementById('comm-gate').querySelector('h3').textContent = '✓ Commissioner View';
+    document.getElementById('comm-gate').querySelector('h3').textContent = '✓ Commissioner View — auto-locks in 10 min';
     document.getElementById('comm-pw').style.display = 'none';
     document.querySelector('.pw-btn').style.display = 'none';
     document.querySelector('.pw-row').style.display = 'none';
+    // Show values on all player cards
+    document.body.classList.add('comm-mode');
+    document.querySelectorAll('.player-val-display').forEach(el => {
+      const v = parseInt(el.dataset.val) || 0;
+      el.textContent = v > 0 ? v.toLocaleString() : '–';
+    });
     showCommStats();
+    // Auto-lock after 10 minutes
+    clearTimeout(autoLockTimer);
+    autoLockTimer = setTimeout(lockComm, 10 * 60 * 1000);
   } else {
     errEl.style.display = 'block';
   }
+}
+
+function lockComm() {
+  commUnlocked = false;
+  document.body.classList.remove('comm-mode');
+  // Re-hide the comm stats
+  document.getElementById('comm-stats').style.display = 'none';
+  document.getElementById('comm-gate').querySelector('h3').textContent = 'Commissioner View';
+  const pwEl = document.getElementById('comm-pw');
+  const btnEl = document.querySelector('.pw-btn');
+  const rowEl = document.querySelector('.pw-row');
+  if(pwEl) { pwEl.style.display = ''; pwEl.value = ''; }
+  if(btnEl) btnEl.style.display = '';
+  if(rowEl) rowEl.style.display = '';
+  clearTimeout(autoLockTimer);
 }
 
 function showCommStats() {
@@ -1140,11 +1195,17 @@ function resetTrade() {
 async function refreshData() {
   document.getElementById('status-text').innerHTML = '<span class="status-dot"></span>Refreshing...';
   try {
+    await loadDynastyValues();
     await loadLeague();
     renderMyRoster();
     const rid = currentFriendRosterId;
-    if(rid) {
-      loadFriendRoster();
+    if(rid) loadFriendRoster();
+    // Re-populate values if commissioner mode is active
+    if (commUnlocked) {
+      document.querySelectorAll('.player-val-display').forEach(el => {
+        const v = parseInt(el.dataset.val) || 0;
+        el.textContent = v > 0 ? v.toLocaleString() : '–';
+      });
     }
     document.getElementById('status-text').innerHTML = '<span class="status-dot"></span>Live · refreshed just now';
   } catch(e) {
